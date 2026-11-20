@@ -1,0 +1,102 @@
+# Every tunable lives here. Override any key from the command line, e.g.
+#   python -m src.run_eval --mode naive --top_k 5 --max_steps 3 --set retrieval.rrf_k=30
+# API keys are never read from this file: llm.api_key_env names the environment
+# variable that holds the key (loaded from .env by python-dotenv).
+
+run:
+  mode: agentic                # default preset from `modes` below
+  seed: 13
+  results_dir: results
+  log_level: INFO
+  log_format: text             # text | json
+
+llm:
+  provider: openai             # openai: any OpenAI-compatible API | offline: deterministic stand-ins, no network
+  base_url: null               # e.g. https://generativelanguage.googleapis.com/v1beta/openai/ for Gemini
+  api_key_env: OPENAI_API_KEY
+  response_format: json_object # json_object | json_schema (strict schema decoding where supported)
+  timeout_s: 60
+  max_retries: 5               # attempts on rate limits, timeouts and 5xx errors
+  backoff_initial_s: 1.0       # exponential backoff with jitter between attempts
+  backoff_max_s: 30.0
+  max_concurrency: 8           # concurrent API calls (asyncio.Semaphore)
+  max_parse_retries: 1         # re-asks when the output is not valid JSON for the schema
+  seed: 13                     # sent to providers that support it
+
+models:
+  embedding: text-embedding-3-small
+  generator: gpt-4o-mini
+  agent: gpt-4o-mini           # router, grader and rewriter
+  judge: gpt-4o                # keep different from the generator to avoid self-preference bias
+  reranker: BAAI/bge-reranker-v2-m3
+
+pricing:                       # USD per 1M tokens. Check your provider's current prices.
+  gpt-4o-mini: {input: 0.15, output: 0.60}
+  gpt-4o: {input: 2.50, output: 10.00}
+  text-embedding-3-small: {input: 0.02, output: 0.0}
+
+tokens:
+  encoding: o200k_base         # tiktoken encoding; "approx" uses a regex estimate (no download needed)
+
+ingestion:
+  corpus_path: data/sample_corpus.jsonl
+  index_dir: .cache/index
+  chunk_tokens: 200            # hard upper bound per chunk
+  chunk_overlap_tokens: 40     # trailing sentences repeated at the start of the next chunk
+  embed_batch_size: 64
+
+retrieval:
+  mode: hybrid                 # dense | bm25 | hybrid (set by the presets below)
+  top_k: 5                     # chunks per retrieval handed to grading and generation
+  candidates_k: 20             # candidates per retriever before fusion and reranking
+  rrf_k: 60
+  dense_weight: 1.0
+  bm25_weight: 1.0
+  rerank: true
+  reranker: cross_encoder      # cross_encoder | lexical (the offline provider always uses lexical)
+
+agent:
+  enabled: true
+  max_steps: 3                 # hard cap on retrieve → grade rounds
+  min_relevant: 2              # relevant chunks needed to stop searching
+  use_router: true
+  abstain_message: "I don't know based on the available documents."
+
+budgets:
+  max_context_tokens: 2500     # retrieved text packed into the generation prompt
+  max_prompt_tokens: 3500      # hard cap for the whole generation prompt
+  max_answer_tokens: 400
+  max_agent_tokens: 300        # router, grader and rewriter outputs
+  max_judge_tokens: 800
+  max_grade_chunk_tokens: 600  # chunk text shown to the grader
+
+evaluation:
+  dataset: data/sample_eval.jsonl
+  limit: null                  # evaluate only the first N samples
+  k_values: [1, 3, 5]
+  judges: [faithfulness, answer_relevancy, context_precision]
+  max_concurrent_queries: 4
+  bootstrap_samples: 1000      # 95% confidence intervals; 0 disables
+  worst_cases: 5
+
+cache:
+  enabled: true
+  path: .cache/llm_cache.sqlite
+
+modes:                         # ablation presets; each step changes one stage
+  naive:                       # dense retrieval, single pass
+    retrieval.mode: dense
+    retrieval.rerank: false
+    agent.enabled: false
+  hybrid:                      # + BM25 fused with RRF
+    retrieval.mode: hybrid
+    retrieval.rerank: false
+    agent.enabled: false
+  hybrid_rerank:               # + cross-encoder reranking
+    retrieval.mode: hybrid
+    retrieval.rerank: true
+    agent.enabled: false
+  agentic:                     # + router, grading, rewriting and abstention
+    retrieval.mode: hybrid
+    retrieval.rerank: true
+    agent.enabled: true
