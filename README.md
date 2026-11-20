@@ -1,242 +1,287 @@
-# Agentic RAG System with Evaluation Pipeline
+# Agentic RAG with an Evaluation Harness
 
-> **Built an agentic RAG system with self-correcting retrieval and a RAGAS-based evaluation harness across 3 domains (finance, biomedical, legal); improved faithfulness score by 22% and context precision by 37% over baseline through hybrid search, reranking, and query retry logic.**
+A retrieval-augmented QA pipeline with hybrid search, cross-encoder reranking and a
+**bounded corrective agent loop** (route → retrieve → grade → rewrite → generate or
+abstain), plus an evaluation harness that measures it: deterministic retrieval metrics
+on document IDs, structured LLM-as-a-judge metrics, latency and cost, saved per run so
+that configurations can be compared.
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![RAGAS](https://img.shields.io/badge/eval-RAGAS-green.svg)](https://github.com/explodinggradients/ragas)
-[![RAGBench](https://img.shields.io/badge/dataset-RAGBench-orange.svg)](https://huggingface.co/datasets/rungalileo/ragbench)
-[![Streamlit](https://img.shields.io/badge/demo-Streamlit-red.svg)](https://streamlit.io)
+> [!IMPORTANT]
+> **No benchmark results yet.** The previous version of this README reported RAGAS
+> scores (+22% faithfulness, +37% context precision), injection-resistance rates and
+> latency/cost figures that were never measured: the files in `results/` were generated
+> by `random.uniform` in `scripts/mock_data.py`. [`docs/AUDIT.md`](docs/AUDIT.md) documents
+> that and every bug found in the old code. This version produces real numbers when run
+> with an API key; the table below stays empty until that has been done.
 
----
+## How it works
 
-## Problem Framing
+```mermaid
+flowchart TD
+    subgraph ingest ["Ingestion (make ingest)"]
+        C["corpus JSONL<br/>stable doc_id"] --> CH["chunker: sentence- and table-aware,<br/>token-bounded, with overlap"]
+        CH --> EMB["embeddings, L2-normalised"]
+        EMB --> IDX[("index + manifest<br/>(embedding model recorded)")]
+    end
 
-**Naive RAG fails silently.** A retrieve-then-generate chain has no mechanism to detect when retrieved documents are irrelevant, when the query is ambiguous, or when the answer hallucinates facts not in the retrieved context. In production, this means users get confident-sounding wrong answers with no warning.
+    Q["question"] --> M{"agent.enabled?"}
+    M -- "no: naive / hybrid / hybrid_rerank" --> R1["retrieve once"]
+    R1 --> E1{"anything retrieved?"}
+    E1 -- yes --> GEN
+    E1 -- no --> AB
 
-This project solves three interlocked problems:
+    M -- "yes: agentic" --> RT["router"]
+    RT -- refuse --> AB["abstain:<br/>fixed message + reason"]
+    RT -- retrieve --> R["retrieve: dense + BM25 → RRF → rerank"]
+    R --> G["grade each new chunk<br/>against the ORIGINAL question"]
+    G -- "≥ min_relevant" --> GEN
+    G -- "too few and steps left" --> RW["rewrite the search query"]
+    RW --> R
+    G -- "max_steps reached<br/>or no new query" --> CHK{"any relevant chunk?"}
+    CHK -- yes --> GEN["generate: context packed under the token budget,<br/>JSON answer + cited chunk IDs"]
+    CHK -- no --> AB
+    IDX -.-> R
+    IDX -.-> R1
 
-1. **Measurement**: How do you know your RAG system is actually good? → RAGAS evaluation harness across a real benchmark (RAGBench).
-2. **Retrieval quality**: Pure dense vector search misses exact-match and rare-term queries. → Hybrid BM25+vector search with Reciprocal Rank Fusion + cross-encoder reranking.
-3. **Agentic reliability**: What happens when the first retrieval is bad? → A corrective state machine that grades documents, rewrites queries, retries, and abstains when evidence is insufficient.
+    GEN --> T["AgentTrace: steps, IDs, tokens, latency, cost"]
+    AB --> T
 
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      AGENTIC RAG SYSTEM                              │
-│                                                                      │
-│  ┌──────────────┐    ┌────────────────────┐    ┌──────────────────┐ │
-│  │  INGESTION   │    │    RETRIEVAL        │    │  AGENTIC LOOP    │ │
-│  │              │    │                    │    │                  │ │
-│  │ Fixed-size   │───▶│ Dense (ChromaDB)   │───▶│ Route decision   │ │
-│  │ Recursive    │    │ BM25 (rank_bm25)   │    │ Grade docs       │ │
-│  │ chunking     │    │ RRF Fusion         │    │ Rewrite & retry  │ │
-│  │              │    │ bge-reranker       │    │ Abstain guard    │ │
-│  │ OpenAI emb.  │    │ HyDE transform     │    │                  │ │
-│  └──────────────┘    └────────────────────┘    └────────┬─────────┘ │
-│                                                          │           │
-│  ┌───────────────────────────────────────────────────────▼────────┐  │
-│  │  GENERATION: GPT-4o + [Doc N] citations + faithfulness check   │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  EVALUATION: RAGAS × 4 metrics × 3 domains × 4 variants      │   │
-│  │  ADVERSARIAL: 25 injection tests × 4 defense configs         │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Results
-
-### RAGAS Evaluation — Averaged Across Finance, Biomedical, Legal
-
-| Configuration | Faithfulness | Answer Relevancy | Ctx Precision | Ctx Recall | Avg |
-|---|---|---|---|---|---|
-| Naive RAG (baseline) | 0.71 | 0.68 | 0.62 | 0.59 | 0.65 |
-| + Hybrid Search | 0.78 | 0.71 | 0.74 | 0.70 | 0.73 |
-| + Reranking | 0.83 | 0.74 | 0.81 | 0.75 | 0.78 |
-| + Agentic Retry | **0.87** | **0.79** | **0.85** | **0.80** | **0.83** |
-
-> ⬆️ **+22% faithfulness** and **+37% context precision** from baseline to full agentic pipeline.
-
-### Adversarial Robustness
-
-| Defense Layer | Injection Resistance |
-|---|---|
-| No defense | 61% |
-| + Treat-as-data instruction | 78% |
-| + Delimiter sandboxing | 85% |
-| + Output filtering | **93%** |
-
-> 25 test cases across 5 attack categories (injection, exfiltration, nested, unanswerable, authority spoofing).
-> The document grading step caught 73% of injected adversarial chunks before generation.
-
----
-
-## Key Technical Decisions
-
-### Why hybrid search beats pure vector search
-Dense embeddings excel at semantic similarity but miss exact-match queries (rare terms, proper nouns, numbers). BM25 catches these. Reciprocal Rank Fusion combines both ranked lists without needing to normalize scores across different spaces — you only need rank positions.
-
-### Why the corrective loop matters
-On initial retrieval, ~25% of queries retrieve a majority of irrelevant documents. Without the grading+retry loop, these go straight to the generator which hallucinates an answer. The loop reformulates the query and retries (max 2×) before explicitly abstaining — this directly measures as higher faithfulness.
-
-### Why plain Python beats LangGraph for this use case
-The corrective loop is 80 lines of Python with a state enum. Every transition is readable in an interview. LangGraph would add 3× the code for no additional clarity at this scale. The tradeoff: LangGraph is better once the graph has 10+ nodes or requires parallel branches.
-
-### Latency vs. quality trade-off
-| Config | Avg Latency | RAGAS Avg | Est. Cost/Query |
-|---|---|---|---|
-| Naive | 1.2s | 0.65 | $0.002 |
-| Hybrid | 1.5s | 0.73 | $0.003 |
-| + Reranking | 1.9s | 0.78 | $0.005 |
-| Agentic Full | 2.6s | 0.83 | $0.008 |
-
-The reranker adds 400ms latency for a 5-point RAGAS gain — often worth it. The agentic loop adds 700ms on retry paths (only triggered ~25% of the time in practice).
-
----
-
-## Project Structure
-
-```
-agentic-rag/
-├── src/
-│   ├── ingestion/          # Chunking, embedding, indexing
-│   │   ├── chunker.py      # Fixed + recursive strategies
-│   │   ├── embedder.py     # OpenAI + local embedding abstraction
-│   │   └── indexer.py      # ChromaDB + BM25 indexers
-│   ├── retrieval/          # All retrieval strategies
-│   │   ├── dense_retriever.py
-│   │   ├── bm25_retriever.py
-│   │   ├── hybrid_retriever.py  # RRF fusion
-│   │   ├── reranker.py          # bge-reranker cross-encoder
-│   │   └── hyde.py              # Hypothetical Document Embeddings
-│   ├── agent/              # Agentic state machine
-│   │   ├── grader.py            # Per-chunk relevance grader
-│   │   ├── query_rewriter.py    # Failed query rewriting
-│   │   ├── router.py            # Retrieve/direct/clarify/refuse routing
-│   │   └── corrective_loop.py  # Core state machine (plain Python)
-│   ├── generation/         # Answer synthesis + guardrails
-│   │   ├── generator.py         # Citations + self-check faithfulness
-│   │   └── guardrails.py        # Output filtering + context sandboxing
-│   ├── evaluation/         # Full evaluation harness
-│   │   ├── ragas_eval.py        # RAGAS × RAGBench
-│   │   ├── adversarial.py       # 25-case injection test suite
-│   │   └── tracker.py           # Per-stage latency/cost tracking
-│   └── pipeline.py         # Orchestrator — 4 pipeline variants
-├── app/
-│   └── streamlit_app.py    # Interactive demo
-├── notebooks/              # Step-by-step walkthroughs
-├── configs/
-│   └── pipeline_configs.yaml
-├── results/
-│   └── eval_results.json   # Saved RAGAS results
-└── requirements.txt
+    subgraph evaluate ["Evaluation (make eval)"]
+        T --> RM["Recall@K · MRR · NDCG<br/>on document IDs"]
+        T --> J["judges at temperature 0, cached:<br/>faithfulness · relevancy · context precision"]
+        RM --> AGG["means + 95% bootstrap CIs,<br/>p50/p95 latency, cost per query"]
+        J --> AGG
+        AGG --> RUN[("results/&lt;timestamp&gt;_&lt;mode&gt;/")]
+    end
 ```
 
----
+**Design choices**
+
+- **One chunk ID everywhere.** `chunk_id = "<doc_id>::<position>"` is produced by the
+  chunker and used by the dense index, BM25, RRF, citations and metrics. In the old
+  code dense and BM25 hits had different IDs, so "hybrid" search never fused anything.
+- **Exact cosine search on normalised vectors**, with the embedding model recorded in the
+  index manifest; querying with a different model raises `IndexMismatchError` instead of
+  returning silently wrong neighbours. Exact search keeps every vector in memory, which is
+  comfortable for tens of thousands of chunks; beyond that, put FAISS or a vector database
+  behind `Retriever`.
+- **BM25 with Lucene's IDF** (always positive) and punctuation-free tokens, fused with the
+  dense ranking by Reciprocal Rank Fusion, which needs ranks only, not comparable scores.
+- **A bounded loop in plain Python.** `for` over `agent.max_steps`; rewrites change only the
+  search query, never the question that is graded and answered. Every LLM failure has a
+  recorded fallback (router → retrieve, grader → not relevant, rewriter → stop, generator →
+  abstain), and an empty or irrelevant retrieval abstains instead of answering from memory.
+- **Budgets in tokens.** Retrieved text is packed under `budgets.max_context_tokens`, and the
+  whole prompt, including the JSON-schema instruction, is checked against
+  `budgets.max_prompt_tokens` before the call.
+- **Structured, cached, deterministic LLM calls.** Every call (router, grader, rewriter,
+  generator, judges) runs at temperature 0, returns JSON validated by a Pydantic schema
+  with one repair retry, goes through an SQLite cache keyed by (provider, model, prompt
+  hash), retries rate limits and 5xx with exponential backoff, and records tokens, cost
+  and latency.
+- **Ablations change one stage at a time.** All modes share one index; `naive` → `hybrid`
+  adds BM25 + RRF, `hybrid_rerank` adds the reranker, `agentic` adds the loop.
 
 ## Setup
 
-### Prerequisites
-- Python 3.10+
-- OpenAI API key
-
-### Install
+```bash
+python -m venv .venv && source .venv/bin/activate
+```
 
 ```bash
-# Clone
-git clone <your-repo-url>
-cd agentic-rag
+make install-dev
+```
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure
+```bash
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
 ```
 
-### Run the demo app
+Put your key in `.env` (`OPENAI_API_KEY=...`). Keys are read only from the environment;
+`config.yaml` names the variable (`llm.api_key_env`) and never holds a key. For the
+cross-encoder reranker also run `pip install "sentence-transformers>=3.0"`.
+
+**Gemini or another OpenAI-compatible API** needs no code change, only configuration.
+Add your Gemini models to `pricing:` in `config.yaml` to get costs. The defaults are
+OpenAI's, and Gemini's model names change, so check the current ones; untested here.
 
 ```bash
-streamlit run app/streamlit_app.py
+make eval ARGS="--set llm.api_key_env=GEMINI_API_KEY --set llm.base_url=https://generativelanguage.googleapis.com/v1beta/openai/ --set models.generator=gemini-2.5-flash --set models.agent=gemini-2.5-flash --set models.judge=gemini-2.5-pro --set models.embedding=gemini-embedding-001 --set llm.seed=null"
 ```
 
-### Run the full evaluation
+## Smoke test without an API key
+
+`make smoke` runs ingestion, the `naive` and `agentic` evaluations and the comparison with
+the **offline provider**: hashed bag-of-words embeddings, a lexical reranker and
+word-overlap heuristics in place of every LLM call. It checks that the plumbing works end
+to end, in a few seconds. Its scores say nothing about model quality.
 
 ```bash
-# Runs RAGAS eval on all 4 variants × 3 domains × 50 samples
-# Warning: uses ~$5-10 in OpenAI API credits
-python -c "
-from src.pipeline import RAGPipeline, PIPELINE_CONFIGS
-from src.evaluation.ragas_eval import run_full_evaluation
-
-pipeline_fns = {
-    name: RAGPipeline.from_config(name).as_eval_fn()
-    for name in ['naive', 'hybrid', 'hybrid_rerank', 'agentic_full']
-}
-df = run_full_evaluation(pipeline_fns, n_samples=50)
-print(df)
-"
+make smoke
 ```
 
-### Run adversarial tests
+## Ingest, evaluate, compare
 
 ```bash
-python -c "
-from src.pipeline import RAGPipeline
-from src.evaluation.adversarial import run_adversarial_eval, print_defense_comparison
-
-pipeline = RAGPipeline.from_config('agentic_full')
-pipeline_fn = lambda q, docs: pipeline.run(q)['answer']
-
-df = run_adversarial_eval(pipeline_fn, defense_label='agentic_full')
-print(df.groupby('category')['score'].mean())
-"
+make ingest
 ```
 
----
-
-## Evaluation Methodology
-
-**Why RAGBench?**
-RAGBench provides ground-truth answers and human-annotated relevance/faithfulness labels — this means you can validate whether your RAGAS scores correlate with human judgment, not just measure them in a vacuum.
-
-**Why RAGAS?**
-RAGAS is the standard open-source RAG evaluation framework. Its 4 core metrics cover both retrieval quality (context precision/recall) and generation quality (faithfulness, answer relevancy) — giving a complete picture.
-
-**Regression test mindset:**
-Every configuration change is validated against the same fixed eval set before being called an "improvement." This mirrors real ML engineering practice: never claim a change works without running the eval.
-
----
-
-## What "Agentic" Actually Means Here
-
-The corrective RAG loop is a **state machine**, not a chatbot. It has 8 states:
-
-```
-ROUTE → RETRIEVE → GRADE → GENERATE → DONE
-                      ↓
-                   REWRITE → RETRIEVE → GRADE → GENERATE → DONE
-                      ↓
-                   ABSTAIN → DONE
+```bash
+make eval MODE=naive
 ```
 
-Every state transition is conditional on evidence — not vibes. The grader's output determines whether to proceed or retry. The retry count bounds computational cost. The abstention is explicit and measurable. This is what distinguishes "agentic" from "the model did some extra thinking."
+```bash
+make eval MODE=agentic
+```
 
----
+```bash
+make compare
+```
 
-## Extending This Project
+`make compare` compares the latest `naive` run (A) with the latest `agentic` run (B);
+pass `A=results/<run> B=results/<run>` for any other pair. Run all four modes with
+`make eval-all`. Any config key can be overridden, either through `ARGS` or directly:
 
-| Extension | Effort | Impact |
-|---|---|---|
-| Fine-tune embedding model on RAGBench | High | High — shows model adaptation |
-| Add Arize Phoenix tracing | Low | High — visual trace for README |
-| Multi-agent (planner + retriever + checker) | High | Medium — overkill at this scale |
-| FastAPI + Redis cache layer | Medium | High — for ML engineer roles |
-| Deploy to HuggingFace Spaces | Low | High — shareable demo link |
+```bash
+python -m src.run_eval --mode agentic --top_k 5 --max_steps 3 --set retrieval.rrf_k=30 --limit 20
+```
+
+**The 30-question RAGBench set.** `make ragbench` builds a pooled corpus and an
+evaluation set from the RAGBench samples in `data/ragbench_samples/` (finance, biomedical
+and legal). Each question's gold documents are the documents RAGBench paired with it, and
+its reference answer is RAGBench's LLM-generated `response`, marked as such.
+
+```bash
+make ragbench
+```
+
+```bash
+make ingest ARGS="--corpus data/ragbench_corpus.jsonl --index-dir .cache/ragbench-index"
+```
+
+```bash
+make eval-all ARGS="--dataset data/ragbench_eval.jsonl --set ingestion.index_dir=.cache/ragbench-index"
+```
+
+### What a run saves
+
+Each run writes `results/<UTC timestamp>_<mode>[_<name>]/`:
+
+| File | Contents |
+|---|---|
+| `config.resolved.yaml` | the exact configuration after presets and overrides |
+| `report.json` | metrics with 95% bootstrap CIs and `n`, p50/p95 latency per stage, cost, git commit, dataset and index fingerprints |
+| `traces.jsonl` | per question: retrieved chunk IDs, every agent step, queries tried, the answer and citations, judge rationales, tokens, latency |
+| `worst_cases.jsonl`, `worst_cases.md` | the lowest-scoring questions with full traces, for error analysis |
+| `run.log` | the run's log as JSON lines |
+
+## Benchmark
+
+| Configuration | Recall@5 | MRR | Faithfulness | Answer relevancy | Context precision | Abstention accuracy | p50 latency | Cost / query |
+|---|---|---|---|---|---|---|---|---|
+| Dense RAG (`naive`) | — | — | — | — | — | — | — | — |
+| Hybrid BM25 + dense (`hybrid`) | — | — | — | — | — | — | — | — |
+| Hybrid + rerank (`hybrid_rerank`) | — | — | — | — | — | — | — | — |
+| Agentic RAG (`agentic`) | — | — | — | — | — | — | — | — |
+
+*Not measured yet: this environment has no API key.* To fill the table, run `make
+eval-all` on the 30-question set, then take the numbers from each run's `report.json` or
+from `python -m src.compare_runs <A> <B> --markdown`. Report each mean with its 95% CI
+and `n`: with 30 questions, differences smaller than the CIs are noise.
+
+## Evaluation methodology
+
+- **Retrieval metrics** compare the document IDs of the context the generator saw (in
+  order, duplicates removed) with `gold_doc_ids`: Recall@K, MRR and binary NDCG@K, for
+  answerable questions with gold IDs.
+- **Judges** use `models.judge`, which should differ from the generator to limit
+  self-preference bias; `config.yaml` warns when they are the same. Each judge writes its
+  reasoning before the verdict:
+  - *faithfulness*: the answer is split into atomic claims, each marked supported or not;
+    the score is supported / total.
+  - *answer relevancy*: a 1–5 rubric mapped to 0–1.
+  - *context precision*: each chunk is judged on its own, so the order of the other chunks
+    cannot sway the verdict; the score is the average precision of the useful chunks.
+
+  All judges are pointwise, so the position bias of pairwise A/B judging does not arise.
+- **Abstention is scored explicitly.** For an unanswerable question, abstaining is correct
+  (`abstention_accuracy`). For an answerable one, abstaining scores 0 relevancy. An
+  abstention has no claims to check, so faithfulness is `None` rather than a free 1.0.
+- **Failures are counted, never invented.** A judge that returns unusable output gives
+  `None` with the error stored, and the report counts queries with errors (`n_errors`).
+- **Uncertainty.** Every metric reports its `n` and a 95% percentile-bootstrap interval.
+
+## Tests and CI
+
+`make test` runs 107 tests in about two seconds with **no API key and no network**:
+LLM calls go to a scripted fake or to the offline backend, and the OpenAI SDK itself is
+exercised through `httpx.MockTransport`.
+
+| File | Covers |
+|---|---|
+| `tests/test_agent_loops.py` | multi-step retrieval and synthesis; stopping at exactly `max_steps`; malformed JSON (repaired or falling back); empty retrieval; router refusal; retries; token budgets; concurrent queries not sharing state |
+| `tests/test_retrieval_metrics.py` | Recall@K, MRR, NDCG and RRF against hand-computed values, with empty lists, duplicate IDs and K beyond the list; BM25 tokenisation and IDF; filters; index/model mismatch |
+| `tests/test_evaluator.py` | judges with valid, malformed, refused and out-of-range replies; abstention edge cases; aggregates finite and within [0, 1] |
+| `tests/test_ingestion.py` | token limits, preserved overlap, sentence and table boundaries, deterministic IDs, manifest |
+| `tests/test_llm.py` | temperature 0, cache hits and provider namespacing, retry policy, costs, the OpenAI request format via mocked HTTP |
+| `tests/test_cli.py` | ingest → eval → compare end to end, cached re-runs, CLI overrides and error exits |
+
+```bash
+make test
+```
+
+```bash
+make lint
+```
+
+GitHub Actions runs ruff (lint and format) and the tests on Python 3.10 with dependency
+ranges and on Python 3.13 with the pinned `requirements.txt`, followed by `make smoke`.
+
+## Project structure
+
+```
+├── config.yaml             # every tunable, plus the ablation presets under `modes`
+├── src/
+│   ├── schemas.py          # Pydantic contracts shared by all modules (and the config schema)
+│   ├── utils.py            # config + CLI overrides, logging, token counting, SQLite cache, provenance
+│   ├── llm.py              # async OpenAI-compatible and offline clients: JSON outputs, retries, cost
+│   ├── ingestion.py        # chunking and index build (python -m src.ingestion)
+│   ├── retriever.py        # cosine index, BM25, RRF, reranking, filters
+│   ├── agent.py            # router, grader, rewriter, bounded loop, budgeted generation
+│   ├── evaluator.py        # retrieval metrics, judges, aggregation
+│   ├── run_eval.py         # benchmark CLI (python -m src.run_eval)
+│   └── compare_runs.py     # run comparison (python -m src.compare_runs)
+├── data/
+│   ├── sample_corpus.jsonl # 79 RAGBench finance + biomedical documents
+│   ├── sample_eval.jsonl   # 5 questions, human-written references, 1 unanswerable
+│   └── ragbench_samples/   # raw RAGBench samples (source for make ragbench)
+├── scripts/prepare_ragbench.py
+├── tests/                  # offline test suite
+└── docs/AUDIT.md           # audit of the previous version
+```
+
+## Limitations
+
+- Nothing here has been run against a real model API, because this environment had no
+  key. The OpenAI request and response handling is tested through the real SDK with mocked
+  HTTP; the Gemini settings above are untested.
+- The cross-encoder reranker path is not exercised in CI, because it needs a model
+  download.
+- The sample set has 5 questions and the RAGBench set 30: enough to compare
+  configurations roughly, not to rank them precisely. RAGBench gold documents are the
+  documents paired with each question, so a few are off-topic; its reference answers are
+  LLM output.
+- Exact search loads all embeddings into memory.
+
+## Changes from the previous version
+
+The mock-data scripts, the generated `results/`, and the committed Chroma databases were
+removed. So were the Streamlit app, the notebook and the adversarial suite: they were
+built on the old modules and displayed the generated numbers, and the adversarial runner
+could not fail (a pipeline that crashes on every input scored 90%). Prompt-injection
+hygiene is kept in the generation prompt: documents are delimited and treated as data,
+and closing tags inside them are escaped.
+
+## Data
+
+`data/` contains samples of [RAGBench](https://huggingface.co/datasets/rungalileo/ragbench)
+(FinQA, PubMedQA and CUAD subsets); see the dataset card for its licence.

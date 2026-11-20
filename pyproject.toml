@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-rag-eval"
+version = "1.0.0"
+description = "Agentic RAG with hybrid retrieval, a bounded corrective loop and an offline-testable evaluation harness"
+readme = "README.md"
+requires-python = ">=3.10"
+# Ranges for library use and the Python 3.10 CI job; requirements.txt pins the tested versions.
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.6",
+  "PyYAML>=6.0",
+  "python-dotenv>=1.0",
+  "openai>=1.40",
+  "httpx>=0.27",
+  "tenacity>=8.2",
+  "tiktoken>=0.7",
+]
+
+[project.optional-dependencies]
+rerank = ["sentence-transformers>=3.0"]  # cross-encoder reranker (pulls in PyTorch)
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+rag-ingest = "src.ingestion:main"
+rag-eval = "src.run_eval:main"
+rag-compare = "src.compare_runs:main"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM", "NPY", "RUF100"]
+ignore = ["SIM905"]  # "a b c".split() reads better than a long list literal
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
