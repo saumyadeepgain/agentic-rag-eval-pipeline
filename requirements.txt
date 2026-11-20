@@ -1,42 +1,13 @@
-# ─── Core LLM & Embeddings ───────────────────────────────────────────────────
-openai>=1.40.0
-tiktoken>=0.7.0
-
-# ─── Vector Store ────────────────────────────────────────────────────────────
-chromadb>=0.5.0
-
-# ─── Sparse Retrieval (BM25) ──────────────────────────────────────────────────
-rank-bm25>=0.2.2
-
-# ─── Reranking (local cross-encoder) ─────────────────────────────────────────
-sentence-transformers>=3.0.0
-torch>=2.0.0
-
-# ─── RAG Evaluation ──────────────────────────────────────────────────────────
-ragas>=0.1.21
-langchain-community>=0.2.0
-datasets>=2.20.0
-
-# ─── Text Splitting ───────────────────────────────────────────────────────────
-langchain-text-splitters>=0.2.0
-
-# ─── Data & Visualization ────────────────────────────────────────────────────
-pandas>=2.0.0
-numpy>=1.26.0
-plotly>=5.22.0
-matplotlib>=3.8.0
-
-# ─── Demo App ─────────────────────────────────────────────────────────────────
-streamlit>=1.36.0
-
-# ─── Utilities ───────────────────────────────────────────────────────────────
-python-dotenv>=1.0.0
-httpx>=0.27.0
-pydantic>=2.7.0
-tqdm>=4.66.0
-loguru>=0.7.0
-pyyaml>=6.0.1
-
-# ─── Notebooks ───────────────────────────────────────────────────────────────
-jupyter>=1.0.0
-ipykernel>=6.29.0
+# Pinned runtime dependencies (tested on Python 3.13; CI also tests 3.10 with the
+# ranges in pyproject.toml). Install: pip install -r requirements.txt
+#
+# Optional cross-encoder reranker (pulls in PyTorch and downloads the model on first use;
+# not exercised in CI): pip install "sentence-transformers>=3.0"
+numpy==2.5.3
+pydantic==2.14.4
+PyYAML==6.0.3
+python-dotenv==1.2.3
+openai==3.57.0
+httpx==0.28.1
+tenacity==9.2.1
+tiktoken==0.14.0
